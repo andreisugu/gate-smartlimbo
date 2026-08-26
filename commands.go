@@ -151,7 +151,7 @@ func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager) {
 	buildAdminCmd := func(alias string) brigodier.LiteralNodeBuilder {
 		return brigodier.Literal(alias).
 			Requires(command.Requires(func(c *command.RequiresContext) bool {
-				return c.Source.HasPermission("smartlimbo.admin")
+				return c.Source.HasPermission("smartlimbo.admin") || c.Source.HasPermission("smartlimbo.reload") || c.Source.HasPermission("smartlimbo.status") || c.Source.HasPermission("*")
 			})).
 			Executes(command.Command(func(cmdCtx *command.Context) error {
 				return cmdCtx.Source.SendMessage(&c.Text{
@@ -160,6 +160,9 @@ func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager) {
 				})
 			})).
 			Then(brigodier.Literal("reload").
+				Requires(command.Requires(func(c *command.RequiresContext) bool {
+					return c.Source.HasPermission("smartlimbo.reload") || c.Source.HasPermission("smartlimbo.admin") || c.Source.HasPermission("*")
+				})).
 				Executes(command.Command(func(cmdCtx *command.Context) error {
 					if _, err := store.Load(); err != nil {
 						return cmdCtx.Source.SendMessage(&c.Text{Content: fmt.Sprintf("§c[SmartLimbo] Reload failed: %v", err)})
@@ -168,6 +171,9 @@ func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager) {
 				})),
 			).
 			Then(brigodier.Literal("status").
+				Requires(command.Requires(func(c *command.RequiresContext) bool {
+					return c.Source.HasPermission("smartlimbo.status") || c.Source.HasPermission("smartlimbo.admin") || c.Source.HasPermission("*")
+				})).
 				Executes(command.Command(func(cmdCtx *command.Context) error {
 					cfg := store.Get()
 					summary := queue.GetAllQueuesSummary()
