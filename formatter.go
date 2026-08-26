@@ -18,6 +18,7 @@ var (
 	tagHexRegex          = regexp.MustCompile(`(?i)<#([0-9a-f]{6})>`)
 	tagShortHex          = regexp.MustCompile(`(?i)<#([0-9a-f]{3})>`)
 	tagColorRegex        = regexp.MustCompile(`(?i)<color:#([0-9a-f]{6})>`)
+	clickTagRegex        = regexp.MustCompile(`(?i)<click:(open_url|run_command|suggest_command):['"]?([^'">]+)['"]?>(.*?)</click>`)
 
 	legacyColorMap = map[rune]color.Color{
 		'0': color.Black,
@@ -61,10 +62,59 @@ var (
 	}
 )
 
-// FormatText parses MiniMessage, RGB, and Legacy color tags into a Minecraft Component.
+// FormatText parses MiniMessage, RGB, Legacy color tags, and Click/Hover tags into a Minecraft Component.
 func FormatText(input string) c.Component {
 	if input == "" {
 		return &c.Text{Content: ""}
+	}
+
+	// Support MiniMessage <click:...>...</click> tags
+	if clickTagRegex.MatchString(input) {
+		root := &c.Text{Content: ""}
+		lastIdx := 0
+		for _, loc := range clickTagRegex.FindAllStringSubmatchIndex(input, -1) {
+			if loc[0] > lastIdx {
+				before := input[lastIdx:loc[0]]
+				root.Extra = append(root.Extra, FormatText(before))
+			}
+			action := strings.ToLower(input[loc[2]:loc[3]])
+			value := input[loc[4]:loc[5]]
+			inner := input[loc[6]:loc[7]]
+
+			innerComp := FormatText(inner)
+			var clickEv c.ClickEvent
+			var hoverEv c.HoverEvent
+
+			switch action {
+			case "open_url":
+				clickEv = c.OpenUrl(value)
+				hoverEv = c.ShowText(FormatText(fmt.Sprintf("&eClick to open link:\n&b%s", value)))
+			case "run_command":
+				clickEv = c.RunCommand(value)
+				hoverEv = c.ShowText(FormatText(fmt.Sprintf("&aClick to run:\n&b%s", value)))
+			case "suggest_command":
+				clickEv = c.SuggestCommand(value)
+				hoverEv = c.ShowText(FormatText(fmt.Sprintf("&eClick to insert:\n&b%s", value)))
+			}
+
+			applyEvents := func(target c.Component) {
+				if st := target.Style(); st != nil {
+					st.ClickEvent = clickEv
+					st.HoverEvent = hoverEv
+				}
+			}
+			applyEvents(innerComp)
+			for _, ch := range innerComp.Children() {
+				applyEvents(ch)
+			}
+
+			root.Extra = append(root.Extra, innerComp)
+			lastIdx = loc[1]
+		}
+		if lastIdx < len(input) {
+			root.Extra = append(root.Extra, FormatText(input[lastIdx:]))
+		}
+		return root
 	}
 
 	// 1. Process <rainbow>
