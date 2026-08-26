@@ -31,8 +31,6 @@ Add the plugin package to your **Gate Go Plugins (List)** setting:
 ```text
 github.com/andreisugu/gate-smartlimbo
 ```
-*(Combine with other plugins: `github.com/andreisugu/gate-simplewhitelist, github.com/andreisugu/gate-hybridforwarding, github.com/andreisugu/gate-bettertab, github.com/andreisugu/gate-smartlimbo`)*
-
 ### In Go Code
 ```bash
 go get github.com/andreisugu/gate-smartlimbo
