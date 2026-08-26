@@ -148,12 +148,15 @@ func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager) {
 	// -------------------------------------------------------------------------
 	// 3. /smartlimbo admin command
 	// -------------------------------------------------------------------------
-	p.Command().Register(
-		brigodier.Literal("smartlimbo").
+	buildAdminCmd := func(alias string) brigodier.LiteralNodeBuilder {
+		return brigodier.Literal(alias).
+			Requires(command.Requires(func(c *command.RequiresContext) bool {
+				return c.Source.HasPermission("smartlimbo.admin")
+			})).
 			Executes(command.Command(func(cmdCtx *command.Context) error {
 				return cmdCtx.Source.SendMessage(&c.Text{
 					Content: "§b[SmartLimbo for Gate] §7by Andrei\n" +
-						"§7Commands: §f/smartlimbo reload§7, §f/smartlimbo status§7, §f/reconnect§7, §f/queue info§7, §f/queue leave",
+						"§7Commands: §f/" + alias + " reload§7, §f/" + alias + " status§7, §f/reconnect§7, §f/queue info§7, §f/queue leave",
 				})
 			})).
 			Then(brigodier.Literal("reload").
@@ -180,6 +183,9 @@ func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager) {
 					}
 					return cmdCtx.Source.SendMessage(&c.Text{Content: b.String()})
 				})),
-			),
-	)
+			)
+	}
+
+	p.Command().Register(buildAdminCmd("smartlimbo"))
+	p.Command().Register(buildAdminCmd("slimbo"))
 }
