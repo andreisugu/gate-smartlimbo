@@ -1,7 +1,7 @@
 # Gate SmartLimbo
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/andreisugu/gate-smartlimbo.svg)](https://pkg.go.dev/github.com/andreisugu/gate-smartlimbo)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 A smart **Limbo failover, per-server auto-reconnect queue, and protected sandbox extension** for the [Gate Minecraft proxy](https://github.com/minekube/gate).
 
@@ -115,4 +115,4 @@ command_blocked = "<red>✖ Commands are blocked in Limbo.\n<gray>Use <yellow>/l
 
 ## 📄 License
 
-[MIT](LICENSE) © Andrei
+[Apache 2.0](LICENSE) © Andrei
