@@ -67,7 +67,49 @@ func (h *LimboHandler) Start(ctx context.Context) {
 	}()
 }
 
-// HandleKick intercepts server kicks and moves the player into Limbo + Smart Reconnect Queue.
+// FindBestFallback finds the highest priority online fallback server from the configured list.
+func (h *LimboHandler) FindBestFallback(excludeServer string) proxy.RegisteredServer {
+	cfg := h.store.Get()
+	if cfg == nil {
+		return nil
+	}
+
+	exclude := strings.ToLower(strings.TrimSpace(excludeServer))
+	timeout := time.Duration(cfg.PingTimeoutMs) * time.Millisecond
+
+	// 1. Check fallback_servers in priority order
+	for _, name := range cfg.FallbackServers {
+		clean := strings.ToLower(strings.TrimSpace(name))
+		if clean == exclude {
+			continue
+		}
+		srv := h.proxy.Server(clean)
+		if srv == nil {
+			continue
+		}
+		// If it's the configured limbo server, it's considered always available
+		if clean == strings.ToLower(cfg.LimboServer) {
+			return srv
+		}
+		// Check TCP reachability
+		addr := srv.ServerInfo().Addr().String()
+		if isServerReachable(addr, timeout) {
+			return srv
+		}
+	}
+
+	// 2. Ultimate fallback to limbo_server if not already excluded
+	limboName := strings.ToLower(cfg.LimboServer)
+	if limboName != exclude {
+		if srv := h.proxy.Server(cfg.LimboServer); srv != nil {
+			return srv
+		}
+	}
+
+	return nil
+}
+
+// HandleKick intercepts server kicks and moves the player to the best available fallback server + queue.
 func (h *LimboHandler) HandleKick(e *proxy.KickedFromServerEvent) {
 	cfg := h.store.Get()
 	if cfg == nil {
@@ -83,26 +125,26 @@ func (h *LimboHandler) HandleKick(e *proxy.KickedFromServerEvent) {
 		return
 	}
 
-	limboServer := h.proxy.Server(cfg.LimboServer)
-	if limboServer == nil {
-		h.log.Info("Configured limbo server not found in proxy servers", "limbo_server", cfg.LimboServer)
+	targetFallback := h.FindBestFallback(kickedServerName)
+	if targetFallback == nil {
+		h.log.Info("No available fallback server found for kicked player", "kicked_server", kickedServerName)
 		return
 	}
 
 	player := e.Player()
 	pos := h.queue.Enqueue(kickedServerName, player)
 
-	// Redirect player to Limbo
+	// Redirect player to fallback server (e.g. steelmc, or picolimbo)
 	e.SetResult(&proxy.RedirectPlayerKickResult{
-		Server:  limboServer,
+		Server:  targetFallback,
 		Message: nil,
 	})
 
-	// Inform player about their safe Limbo failover and queue position
 	go func() {
 		time.Sleep(200 * time.Millisecond) // Short delay to allow client state transition
 		msgTemplate := cfg.Messages.KickedToLimbo
 		msg := strings.ReplaceAll(msgTemplate, "%server%", kickedServer.ServerInfo().Name())
+		msg = strings.ReplaceAll(msg, "%fallback%", targetFallback.ServerInfo().Name())
 		msg = strings.ReplaceAll(msg, "%position%", strconv.Itoa(pos))
 		_ = player.SendMessage(FormatText(msg))
 	}()
@@ -116,15 +158,13 @@ func (h *LimboHandler) HandleInitialServer(e *proxy.PlayerChooseInitialServerEve
 	}
 
 	if e.InitialServer() == nil {
-		if directSrv := h.proxy.Server(cfg.DirectConnectServer); directSrv != nil {
-			e.SetInitialServer(directSrv)
-		} else if limboSrv := h.proxy.Server(cfg.LimboServer); limboSrv != nil {
-			e.SetInitialServer(limboSrv)
+		if target := h.FindBestFallback(""); target != nil {
+			e.SetInitialServer(target)
 		}
 	}
 }
 
-// HandleCommand intercepts commands executed while inside Limbo.
+// HandleCommand intercepts commands executed while inside the protected Limbo server.
 func (h *LimboHandler) HandleCommand(e *proxy.CommandExecuteEvent) {
 	player, ok := e.Source().(proxy.Player)
 	if !ok {
@@ -144,6 +184,7 @@ func (h *LimboHandler) HandleCommand(e *proxy.CommandExecuteEvent) {
 	currentServerName := strings.ToLower(cs.Server().ServerInfo().Name())
 	limboName := strings.ToLower(cfg.LimboServer)
 
+	// Command blocking ONLY applies while inside the actual Limbo server (not gameplay backup servers like steelmc)
 	if currentServerName != limboName {
 		return
 	}
@@ -184,14 +225,13 @@ func (h *LimboHandler) processQueues(ctx context.Context) {
 			continue
 		}
 
-		// Server is online! Pop batch of players
+		// Target server is back online! Reconnect waiting players in batches
 		batch := h.queue.GetNextBatch(srvName, cfg.ReconnectBatchSize)
 		if len(batch) == 0 {
 			continue
 		}
 
 		for _, qp := range batch {
-			// Check if player is still online
 			if !h.isPlayerConnected(qp.Player.ID()) {
 				continue
 			}
@@ -203,7 +243,7 @@ func (h *LimboHandler) processQueues(ctx context.Context) {
 					msg := strings.ReplaceAll(cfg.Messages.ReconnectSuccess, "%server%", srv.ServerInfo().Name())
 					_ = player.SendMessage(FormatText(msg))
 				} else {
-					// Server rejected connection, put back in queue
+					// Connection rejected or not fully ready, keep in queue
 					h.queue.Enqueue(name, player)
 					_, pos, _, _ := h.queue.GetPosition(player.ID())
 					failMsg := strings.ReplaceAll(cfg.Messages.ReconnectFailed, "%server%", srv.ServerInfo().Name())
@@ -262,7 +302,6 @@ func (h *LimboHandler) isPlayerConnected(id uuid.UUID) bool {
 	return h.proxy.Player(id) != nil
 }
 
-// isServerReachable performs a fast TCP dial check.
 func isServerReachable(addr string, timeout time.Duration) bool {
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
