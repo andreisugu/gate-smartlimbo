@@ -237,18 +237,27 @@ func (h *LimboHandler) processQueues(ctx context.Context) {
 			}
 
 			go func(player proxy.Player, srv proxy.RegisteredServer, name string) {
+				defer func() {
+					_ = recover()
+				}()
+				if !player.Active() {
+					return
+				}
+
 				req := player.CreateConnectionRequest(srv)
 				res, err := req.Connect(ctx)
-				if err == nil && res.Status() == proxy.SuccessConnectionStatus {
+				if err == nil && res != nil && res.Status() == proxy.SuccessConnectionStatus {
 					msg := strings.ReplaceAll(cfg.Messages.ReconnectSuccess, "%server%", srv.ServerInfo().Name())
 					_ = player.SendMessage(FormatText(msg))
 				} else {
-					// Connection rejected or not fully ready, keep in queue
-					h.queue.Enqueue(name, player)
-					_, pos, _, _ := h.queue.GetPosition(player.ID())
-					failMsg := strings.ReplaceAll(cfg.Messages.ReconnectFailed, "%server%", srv.ServerInfo().Name())
-					failMsg = strings.ReplaceAll(failMsg, "%position%", strconv.Itoa(pos))
-					_ = player.SendMessage(FormatText(failMsg))
+					if player.Active() {
+						// Connection rejected or not fully ready, keep in queue
+						h.queue.Enqueue(name, player)
+						_, pos, _, _ := h.queue.GetPosition(player.ID())
+						failMsg := strings.ReplaceAll(cfg.Messages.ReconnectFailed, "%server%", srv.ServerInfo().Name())
+						failMsg = strings.ReplaceAll(failMsg, "%position%", strconv.Itoa(pos))
+						_ = player.SendMessage(FormatText(failMsg))
+					}
 				}
 			}(qp.Player, targetServer, srvName)
 
@@ -268,6 +277,9 @@ func (h *LimboHandler) sendQueueNotifications() {
 
 	allPlayers := h.proxy.Players()
 	for _, player := range allPlayers {
+		if !player.Active() {
+			continue
+		}
 		targetServer, pos, total, queued := h.queue.GetPosition(player.ID())
 		if !queued {
 			continue
@@ -299,7 +311,8 @@ func (h *LimboHandler) sendQueueNotifications() {
 }
 
 func (h *LimboHandler) isPlayerConnected(id uuid.UUID) bool {
-	return h.proxy.Player(id) != nil
+	p := h.proxy.Player(id)
+	return p != nil && p.Active()
 }
 
 func isServerReachable(addr string, timeout time.Duration) bool {
