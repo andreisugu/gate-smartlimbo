@@ -1,0 +1,59 @@
+# =============================================================================
+#                 Gate SmartLimbo Configuration
+# =============================================================================
+# Smart Limbo failover, per-server auto-reconnect queues, and protected sandbox.
+# =============================================================================
+
+# The backend server name used as Limbo (e.g. nanolimbo, picolimbo, limbo)
+limbo_server = "nanolimbo"
+
+# Where to send initial player connections if their target server is offline
+direct_connect_server = "lobby"
+
+# Fallback servers when a player leaves the queue with /leave or /hub
+fallback_servers = ["lobby"]
+
+# -----------------------------------------------------------------------------
+# Reconnection Queue Settings
+# -----------------------------------------------------------------------------
+# How often to check backend server availability (in milliseconds)
+task_interval_ms = 3000
+
+# How often to send queue position updates to waiting players (in milliseconds)
+queue_notify_interval_ms = 3000
+
+# Where queue notifications are shown: "action_bar", "chat", "both", or "none"
+notify_mode = "action_bar"
+
+# How many players to reconnect per tick when a server comes back up
+reconnect_batch_size = 3
+
+# Delay between batches in milliseconds (prevents server join spikes)
+reconnect_delay_ms = 500
+
+# Backend TCP ping timeout in milliseconds
+ping_timeout_ms = 1500
+
+# -----------------------------------------------------------------------------
+# Protected Limbo Sandbox
+# -----------------------------------------------------------------------------
+# Block game commands while players are in the Limbo server
+protected_limbo = true
+
+# Allowed commands while in Limbo (lowercase without leading slash)
+allowed_commands = ["reconnect", "rc", "queue", "leave", "hub", "help", "msg"]
+
+# -----------------------------------------------------------------------------
+# Customizable Messages (MiniMessage & RGB supported)
+# -----------------------------------------------------------------------------
+[messages]
+kicked_to_limbo = "<yellow>⚠ <aqua>%server%</aqua> went offline or restarted.\n<gray>You were moved to Limbo and placed in queue <gold>#%position%</gold>.</gray></yellow>"
+queue_actionbar = "<yellow>⏳ Waiting for <aqua>%server%</aqua> <dark_gray>•</dark_gray> Position: <gold>#%position%</gold>/<gold>%total%</gold></yellow>"
+queue_chat = "<gray>[SmartLimbo] Reconnecting to <aqua>%server%</aqua> (Position <gold>#%position%</gold> of <gold>%total%</gold>)</gray>"
+server_online = "<green>✔ <aqua>%server%</aqua> is back online! Reconnecting now...</green>"
+reconnect_success = "<green>✔ Reconnected to <aqua>%server%</aqua>!</green>"
+reconnect_failed = "<red>✖ <aqua>%server%</aqua> is not ready yet. Still waiting in queue (#%position%)...</red>"
+left_queue = "<yellow>You left the queue and returned to <aqua>%server%</aqua>.</yellow>"
+not_in_queue = "<gray>You are not currently in any reconnect queue.</gray>"
+queue_info = "<aqua>════ SmartLimbo Queue Info ════</aqua>\n<gray>Target Server:</gray> <yellow>%server%</yellow>\n<gray>Your Position:</gray> <gold>#%position%</gold> <gray>of</gray> <gold>%total%</gold>\n<gray>Server Status:</gray> <yellow>%status%</yellow>"
+command_blocked = "<red>✖ Commands are blocked in Limbo.\n<gray>Use <yellow>/leave</yellow> to exit or <yellow>/reconnect</yellow> to retry.</gray></red>"
