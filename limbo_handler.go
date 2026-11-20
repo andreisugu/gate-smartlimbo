@@ -74,32 +74,14 @@ func (h *LimboHandler) FindBestFallback(excludeServer string) proxy.RegisteredSe
 		return nil
 	}
 
-	exclude := strings.ToLower(strings.TrimSpace(excludeServer))
-	timeout := time.Duration(cfg.PingTimeoutMs) * time.Millisecond
-
-	// 1. Check fallback_servers in priority order
-	for _, name := range cfg.FallbackServers {
-		clean := strings.ToLower(strings.TrimSpace(name))
-		if clean == exclude {
-			continue
-		}
-		srv := h.proxy.Server(clean)
-		if srv == nil {
-			continue
-		}
-		// If it's the configured limbo server, it's considered always available
-		if clean == strings.ToLower(cfg.LimboServer) {
-			return srv
-		}
-		// Check TCP reachability
-		addr := srv.ServerInfo().Addr().String()
-		if isServerReachable(addr, timeout) {
-			return srv
-		}
+	// 1. Check fallback_servers in priority order.
+	if target := findReachableFallback(cfg, h.proxy.Server, isServerReachable, excludeServer, true); target != nil {
+		return target
 	}
 
-	// 2. Ultimate fallback to limbo_server if not already excluded
-	limboName := strings.ToLower(cfg.LimboServer)
+	// 2. Ultimate fallback to limbo_server if not already excluded.
+	exclude := strings.ToLower(strings.TrimSpace(excludeServer))
+	limboName := strings.ToLower(strings.TrimSpace(cfg.LimboServer))
 	if limboName != exclude {
 		if srv := h.proxy.Server(cfg.LimboServer); srv != nil {
 			return srv
