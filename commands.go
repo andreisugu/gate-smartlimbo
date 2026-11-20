@@ -83,14 +83,9 @@ func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager) {
 			return player.SendMessage(FormatText(cfg.Messages.NotInQueue))
 		}
 
-		// Redirect player to first available fallback server
-		var fallback proxy.RegisteredServer
-		for _, name := range cfg.FallbackServers {
-			if srv := p.Server(name); srv != nil {
-				fallback = srv
-				break
-			}
-		}
+		// Redirect to the first reachable fallback server. A registered but
+		// offline server must not be selected.
+		fallback := findReachableFallback(cfg, p.Server, isServerReachable, "")
 
 		if fallback != nil {
 			go func() {
