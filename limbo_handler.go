@@ -75,7 +75,7 @@ func (h *LimboHandler) FindBestFallback(excludeServer string) proxy.RegisteredSe
 	}
 
 	// 1. Check fallback_servers in priority order.
-	if target := findReachableFallback(cfg, h.proxy.Server, isServerReachable, excludeServer, true); target != nil {
+	if target := findReachableFallback(cfg, h.proxy.Server, isServerReachable, excludeServer); target != nil {
 		return target
 	}
 

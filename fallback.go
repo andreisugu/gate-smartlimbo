@@ -9,15 +9,12 @@ import (
 
 // findReachableFallback returns the first registered fallback server in
 // priority order that accepts a TCP connection. The configured limbo server is
-// treated as always reachable when includeLimbo is true, matching the kick
-// failover path. When includeLimbo is false, limbo is skipped; /leave already
-// runs inside limbo and must not reconnect to it.
+// treated as always reachable, matching the kick failover path.
 func findReachableFallback(
 	cfg *Config,
 	lookup func(string) proxy.RegisteredServer,
 	reachable func(string, time.Duration) bool,
 	exclude string,
-	includeLimbo bool,
 ) proxy.RegisteredServer {
 	if cfg == nil || lookup == nil || reachable == nil {
 		return nil
@@ -32,10 +29,6 @@ func findReachableFallback(
 		if clean == exclude {
 			continue
 		}
-		if !includeLimbo && clean == limboName {
-			continue
-		}
-
 		srv := lookup(clean)
 		if srv == nil {
 			continue

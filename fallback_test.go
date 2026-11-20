@@ -32,12 +32,11 @@ func TestFindReachableFallback(t *testing.T) {
 	lookup := func(name string) proxy.RegisteredServer { return servers[name] }
 
 	tests := []struct {
-		name         string
-		fallbacks    []string
-		healthy      []string
-		exclude      string
-		includeLimbo bool
-		want         string
+		name      string
+		fallbacks []string
+		healthy   []string
+		exclude   string
+		want      string
 	}{
 		{
 			name:      "healthy first fallback",
@@ -69,24 +68,21 @@ func TestFindReachableFallback(t *testing.T) {
 			want:      "backup",
 		},
 		{
-			name:      "leave skips limbo",
+			name:      "limbo is always available",
 			fallbacks: []string{"limbo", "lobby"},
-			healthy:   []string{"lobby:25565"},
-			want:      "lobby",
+			want:      "limbo",
 		},
 		{
-			name:         "kick keeps limbo as always available",
-			fallbacks:    []string{"limbo", "lobby"},
-			includeLimbo: true,
-			want:         "limbo",
+			name:      "dead fallback then limbo",
+			fallbacks: []string{"lobby", "limbo"},
+			want:      "limbo",
 		},
 		{
-			name:         "excluded fallback is skipped",
-			fallbacks:    []string{"lobby", "backup"},
-			healthy:      []string{"lobby:25565", "backup:25565"},
-			exclude:      "lobby",
-			includeLimbo: true,
-			want:         "backup",
+			name:      "excluded fallback is skipped",
+			fallbacks: []string{"lobby", "backup"},
+			healthy:   []string{"lobby:25565", "backup:25565"},
+			exclude:   "lobby",
+			want:      "backup",
 		},
 	}
 
@@ -106,7 +102,7 @@ func TestFindReachableFallback(t *testing.T) {
 				return false
 			}
 
-			got := findReachableFallback(cfg, lookup, reachable, tt.exclude, tt.includeLimbo)
+			got := findReachableFallback(cfg, lookup, reachable, tt.exclude)
 			if got == nil {
 				if tt.want != "" {
 					t.Fatalf("got nil, want %q", tt.want)
