@@ -45,6 +45,12 @@ func TestFindReachableFallback(t *testing.T) {
 			want:      "lobby",
 		},
 		{
+			name:      "first of two healthy fallbacks wins",
+			fallbacks: []string{"lobby", "backup"},
+			healthy:   []string{"lobby:25565", "backup:25565"},
+			want:      "lobby",
+		},
+		{
 			name:      "dead first fallback uses next",
 			fallbacks: []string{"lobby", "backup"},
 			healthy:   []string{"backup:25565"},
