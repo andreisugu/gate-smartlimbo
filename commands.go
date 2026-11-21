@@ -13,8 +13,13 @@ import (
 	"go.minekube.com/gate/pkg/edition/java/proxy"
 )
 
-// RegisterCommands registers /reconnect, /rc, /queue, /leave, and /smartlimbo commands.
-func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager) {
+// RegisterCommands registers /reconnect, /rc, /queue, /leave, /hub, /lobby, and /smartlimbo commands.
+func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager, handler *LimboHandler) {
+	probeAddr := isServerReachable
+	if handler != nil {
+		probeAddr = handler.ProbeAddr
+	}
+
 	// -------------------------------------------------------------------------
 	// 1. /reconnect & /rc
 	// -------------------------------------------------------------------------
@@ -39,18 +44,31 @@ func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager) {
 			return player.SendMessage(&c.Text{Content: fmt.Sprintf("§cServer %q is not registered.", targetServerName)})
 		}
 
+		if !queue.TryStartConnect(player.ID()) {
+			return player.SendMessage(&c.Text{Content: "§e[SmartLimbo] Reconnection attempt already in progress..."})
+		}
+
 		_ = player.SendMessage(&c.Text{Content: "§e[SmartLimbo] Attempting immediate reconnection..."})
 
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			connectTimeout := time.Duration(cfg.ConnectTimeoutMs) * time.Millisecond
+			if connectTimeout <= 0 {
+				connectTimeout = 5 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 			defer cancel()
 
 			res, err := player.CreateConnectionRequest(targetServer).Connect(ctx)
-			if err == nil && res.Status() == proxy.SuccessConnectionStatus {
-				queue.Remove(player.ID())
+			succeeded := err == nil && res != nil && res.Status() == proxy.SuccessConnectionStatus
+			queue.FinishConnect(player.ID(), succeeded)
+
+			if succeeded {
 				msg := strings.ReplaceAll(cfg.Messages.ReconnectSuccess, "%server%", targetServer.ServerInfo().Name())
 				_ = player.SendMessage(FormatText(msg))
 			} else {
+				if handler != nil && targetServer.ServerInfo() != nil && targetServer.ServerInfo().Addr() != nil {
+					handler.InvalidateProbe(targetServer.ServerInfo().Addr().String())
+				}
 				msg := strings.ReplaceAll(cfg.Messages.ReconnectFailed, "%server%", targetServer.ServerInfo().Name())
 				_, pos, _, _ := queue.GetPosition(player.ID())
 				msg = strings.ReplaceAll(msg, "%position%", strconv.Itoa(pos))
@@ -65,7 +83,70 @@ func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager) {
 	p.Command().Register(brigodier.Literal("rc").Executes(reconnectCmd))
 
 	// -------------------------------------------------------------------------
-	// 2. /queue and /queue leave / info
+	// 2. /hub & /lobby (always send player to a playable fallback server)
+	// -------------------------------------------------------------------------
+	hubCmd := command.Command(func(cmdCtx *command.Context) error {
+		player, ok := cmdCtx.Source.(proxy.Player)
+		if !ok {
+			return cmdCtx.Source.SendMessage(&c.Text{Content: "§cOnly in-game players can use /hub."})
+		}
+
+		cfg := store.Get()
+		if cfg == nil {
+			return nil
+		}
+
+		currentServer := ""
+		if cs := player.CurrentServer(); cs != nil && cs.Server() != nil && cs.Server().ServerInfo() != nil {
+			currentServer = cs.Server().ServerInfo().Name()
+		}
+
+		_, wasQueued := queue.Remove(player.ID())
+
+		fallback := findReachableFallbackWithOptions(cfg, p.Server, probeAddr, currentServer, true)
+		if fallback == nil {
+			// Check if player is already standing in a configured playable fallback/hub server.
+			if currentServer != "" && !strings.EqualFold(currentServer, cfg.LimboServer) {
+				isHub := strings.EqualFold(currentServer, cfg.DirectConnectServer)
+				if !isHub {
+					for _, fb := range cfg.FallbackServers {
+						if strings.EqualFold(currentServer, strings.TrimSpace(fb)) {
+							isHub = true
+							break
+						}
+					}
+				}
+				if isHub {
+					msg := strings.ReplaceAll(cfg.Messages.AlreadyInHub, "%server%", currentServer)
+					return player.SendMessage(FormatText(msg))
+				}
+			}
+			return player.SendMessage(FormatText(cfg.Messages.NoFallbackAvailable))
+		}
+
+		connectTimeout := time.Duration(cfg.ConnectTimeoutMs) * time.Millisecond
+		if connectTimeout <= 0 {
+			connectTimeout = 5 * time.Second
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
+			defer cancel()
+			_, _ = player.CreateConnectionRequest(fallback).Connect(ctx)
+		}()
+
+		tmpl := cfg.Messages.ConnectingHub
+		if wasQueued {
+			tmpl = cfg.Messages.LeftQueue
+		}
+		msg := strings.ReplaceAll(tmpl, "%server%", fallback.ServerInfo().Name())
+		return player.SendMessage(FormatText(msg))
+	})
+
+	p.Command().Register(brigodier.Literal("hub").Executes(hubCmd))
+	p.Command().Register(brigodier.Literal("lobby").Executes(hubCmd))
+
+	// -------------------------------------------------------------------------
+	// 3. /queue and /queue leave / /leave / info
 	// -------------------------------------------------------------------------
 	leaveQueueFunc := func(cmdCtx *command.Context) error {
 		player, ok := cmdCtx.Source.(proxy.Player)
@@ -78,23 +159,36 @@ func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager) {
 			return nil
 		}
 
+		currentServer := ""
+		inLimbo := false
+		if cs := player.CurrentServer(); cs != nil && cs.Server() != nil && cs.Server().ServerInfo() != nil {
+			currentServer = cs.Server().ServerInfo().Name()
+			inLimbo = strings.EqualFold(currentServer, cfg.LimboServer)
+		}
+
 		_, queued := queue.Remove(player.ID())
-		if !queued {
+		if !queued && !inLimbo {
 			return player.SendMessage(FormatText(cfg.Messages.NotInQueue))
 		}
 
-		// Redirect to the first reachable fallback server. A registered but
-		// offline server must not be selected.
-		fallback := findReachableFallback(cfg, p.Server, isServerReachable, "")
-
+		fallback := findReachableFallbackWithOptions(cfg, p.Server, probeAddr, currentServer, true)
 		if fallback != nil {
+			connectTimeout := time.Duration(cfg.ConnectTimeoutMs) * time.Millisecond
+			if connectTimeout <= 0 {
+				connectTimeout = 5 * time.Second
+			}
 			go func() {
-				_, _ = player.CreateConnectionRequest(fallback).Connect(context.Background())
+				ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
+				defer cancel()
+				_, _ = player.CreateConnectionRequest(fallback).Connect(ctx)
 			}()
 			msg := strings.ReplaceAll(cfg.Messages.LeftQueue, "%server%", fallback.ServerInfo().Name())
 			return player.SendMessage(FormatText(msg))
 		}
 
+		if inLimbo && !queued {
+			return player.SendMessage(FormatText(cfg.Messages.NoFallbackAvailable))
+		}
 		return player.SendMessage(&c.Text{Content: "§e[SmartLimbo] Removed from reconnect queue."})
 	}
 
@@ -115,8 +209,8 @@ func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager) {
 		}
 
 		status := "<red>Offline / Restarting</red>"
-		if targetSrv := p.Server(targetServerName); targetSrv != nil {
-			if isServerReachable(targetSrv.ServerInfo().Addr().String(), 1000*time.Millisecond) {
+		if targetSrv := p.Server(targetServerName); targetSrv != nil && targetSrv.ServerInfo() != nil && targetSrv.ServerInfo().Addr() != nil {
+			if probeAddr(targetSrv.ServerInfo().Addr().String(), time.Duration(cfg.PingTimeoutMs)*time.Millisecond) {
 				status = "<green>Online (Processing Queue)</green>"
 			}
 		}
@@ -135,13 +229,10 @@ func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager) {
 			Then(brigodier.Literal("leave").Executes(command.Command(leaveQueueFunc))).
 			Then(brigodier.Literal("info").Executes(command.Command(queueInfoFunc))),
 	)
-
-	// Direct aliases /leave and /hub
 	p.Command().Register(brigodier.Literal("leave").Executes(command.Command(leaveQueueFunc)))
-	p.Command().Register(brigodier.Literal("hub").Executes(command.Command(leaveQueueFunc)))
 
 	// -------------------------------------------------------------------------
-	// 3. /smartlimbo admin command
+	// 4. /smartlimbo admin command
 	// -------------------------------------------------------------------------
 	buildAdminCmd := func(alias string) brigodier.LiteralNodeBuilder {
 		return brigodier.Literal(alias).
@@ -151,7 +242,7 @@ func RegisterCommands(p *proxy.Proxy, store *ConfigStore, queue *QueueManager) {
 			Executes(command.Command(func(cmdCtx *command.Context) error {
 				return cmdCtx.Source.SendMessage(&c.Text{
 					Content: "§b[SmartLimbo for Gate] §7by Andrei\n" +
-						"§7Commands: §f/" + alias + " reload§7, §f/" + alias + " status§7, §f/reconnect§7, §f/queue info§7, §f/queue leave",
+						"§7Commands: §f/" + alias + " reload§7, §f/" + alias + " status§7, §f/reconnect§7, §f/queue info§7, §f/hub",
 				})
 			})).
 			Then(brigodier.Literal("reload").

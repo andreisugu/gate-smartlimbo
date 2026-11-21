@@ -39,7 +39,8 @@ Backend Crash / Restart ─► Move to Limbo ─► Per-Server Queue (e.g. survi
 - **Per-Server Isolated Queues:** Players queued for `survival` aren't stalled behind `creative` restarts, and unreachable fallback servers are safely skipped on `/leave`.
 - **Staggered Batch Reconnect:** Reconnects players in rate-controlled batches (`reconnect_batch_size` / `reconnect_delay_ms`) so recovered backends don't get thunder-herded.
 - **Live Queue Feedback:** Configurable `action_bar`, `chat`, `both`, or `none` MiniMessage updates.
-- **Protected Limbo Sandbox:** Blocks unauthorized commands while players sit in Limbo unless listed in `allowed_commands`.
+- **Protected Limbo Sandbox:** Blocks unauthorized and namespaced commands (`/minecraft:*`) while players sit in Limbo unless listed in `allowed_commands`.
+- **Smart Kick & Switch Handling:** Ignores bans/whitelist/version kicks, keeps players in their current server when a transfer fails, fails over offline initial servers, caches health probes, and preserves queue order across retries.
 
 ---
 
@@ -102,7 +103,8 @@ allowed_commands = ["reconnect", "rc", "queue", "leave", "hub", "help", "msg"]
 | :--- | :--- | :--- |
 | `/reconnect` *(or `/rc`)* | All | Attempt an immediate reconnect to your queued server |
 | `/queue info` *(or `/queue`)* | All | Show queued backend name, queue position, and server status |
-| `/queue leave` *(or `/leave`, `/hub`)* | All | Leave the reconnect queue and transfer to a fallback server |
+| `/hub` *(or `/lobby`)* | All | Transfer to the primary lobby / playable fallback server anytime |
+| `/queue leave` *(or `/leave`)* | All | Leave the reconnect queue (and exit Limbo to a fallback server) |
 | `/smartlimbo status` *(or `/slimbo status`)* | `smartlimbo.status` *(or `smartlimbo.admin`)* | Show Limbo target and per-server queue sizes |
 | `/smartlimbo reload` *(or `/slimbo reload`)* | `smartlimbo.reload` *(or `smartlimbo.admin`)* | Hot-reload `config/smartlimbo.toml` without downtime |
 

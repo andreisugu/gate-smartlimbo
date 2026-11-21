@@ -4,11 +4,25 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/pelletier/go-toml/v2"
 )
+
+var defaultIgnoreKickReasons = []string{
+	"ban",
+	"banned",
+	"blacklist",
+	"whitelist",
+	"not whitelisted",
+	"outdated",
+	"incompatible",
+	"server is full",
+	"afk",
+	"idle",
+}
 
 const defaultConfigTemplate = `# =============================================================================
 #                 Gate SmartLimbo Configuration
@@ -22,7 +36,7 @@ limbo_server = "nanolimbo"
 # Where to send initial player connections if their target server is offline
 direct_connect_server = "lobby"
 
-# Fallback servers when a player leaves the queue with /leave or /hub
+# Fallback servers when a player leaves the queue or uses /hub / /lobby
 fallback_servers = ["lobby"]
 
 # -----------------------------------------------------------------------------
@@ -46,6 +60,29 @@ reconnect_delay_ms = 500
 # Backend TCP ping timeout in milliseconds
 ping_timeout_ms = 1500
 
+# Timeout for backend connection transfers in milliseconds
+connect_timeout_ms = 5000
+
+# TTL for cached backend TCP health checks in milliseconds
+health_cache_ms = 1500
+
+# Clear any pending reconnect queue if the player connects to another gameplay server
+clear_queue_on_server_switch = true
+
+# Kick reasons (case-insensitive substrings) that should NOT trigger auto-reconnect
+ignore_kick_reasons = [
+    "ban",
+    "banned",
+    "blacklist",
+    "whitelist",
+    "not whitelisted",
+    "outdated",
+    "incompatible",
+    "server is full",
+    "afk",
+    "idle",
+]
+
 # -----------------------------------------------------------------------------
 # Protected Limbo Sandbox
 # -----------------------------------------------------------------------------
@@ -53,7 +90,7 @@ ping_timeout_ms = 1500
 protected_limbo = true
 
 # Allowed commands while in Limbo (lowercase without leading slash)
-allowed_commands = ["reconnect", "rc", "queue", "leave", "hub", "help", "msg"]
+allowed_commands = ["reconnect", "rc", "queue", "leave", "hub", "lobby", "help", "msg"]
 
 # -----------------------------------------------------------------------------
 # Customizable Messages (MiniMessage & RGB supported)
@@ -69,36 +106,56 @@ left_queue = "<yellow>You left the queue and returned to <aqua>%server%</aqua>.<
 not_in_queue = "<gray>You are not currently in any reconnect queue.</gray>"
 queue_info = "<aqua>════ SmartLimbo Queue Info ════</aqua>\n<gray>Target Server:</gray> <yellow>%server%</yellow>\n<gray>Your Position:</gray> <gold>#%position%</gold> <gray>of</gray> <gold>%total%</gold>\n<gray>Server Status:</gray> <yellow>%status%</yellow>"
 command_blocked = "<red>✖ Commands are blocked in Limbo.\n<gray>Use <yellow>/leave</yellow> to exit or <yellow>/reconnect</yellow> to retry.</gray></red>"
+already_in_hub = "<yellow>You are already connected to <aqua>%server%</aqua>!</yellow>"
+connecting_hub = "<green>✔ Transferring you to <aqua>%server%</aqua>...</green>"
+no_fallback_available = "<red>✖ No fallback or lobby server is currently reachable.</red>"
+connect_rejected = "<red>✖ Could not connect to <aqua>%server%</aqua>: <gray>%reason%</gray></red>"
 `
 
 // Messages holds user-customizable chat and action bar notifications.
 type Messages struct {
-	KickedToLimbo    string `toml:"kicked_to_limbo"`
-	QueueActionbar   string `toml:"queue_actionbar"`
-	QueueChat        string `toml:"queue_chat"`
-	ServerOnline     string `toml:"server_online"`
-	ReconnectSuccess string `toml:"reconnect_success"`
-	ReconnectFailed  string `toml:"reconnect_failed"`
-	LeftQueue        string `toml:"left_queue"`
-	NotInQueue       string `toml:"not_in_queue"`
-	QueueInfo        string `toml:"queue_info"`
-	CommandBlocked   string `toml:"command_blocked"`
+	KickedToLimbo       string `toml:"kicked_to_limbo"`
+	QueueActionbar      string `toml:"queue_actionbar"`
+	QueueChat           string `toml:"queue_chat"`
+	ServerOnline        string `toml:"server_online"`
+	ReconnectSuccess    string `toml:"reconnect_success"`
+	ReconnectFailed     string `toml:"reconnect_failed"`
+	LeftQueue           string `toml:"left_queue"`
+	NotInQueue          string `toml:"not_in_queue"`
+	QueueInfo           string `toml:"queue_info"`
+	CommandBlocked      string `toml:"command_blocked"`
+	AlreadyInHub        string `toml:"already_in_hub"`
+	ConnectingHub       string `toml:"connecting_hub"`
+	NoFallbackAvailable string `toml:"no_fallback_available"`
+	ConnectRejected     string `toml:"connect_rejected"`
 }
 
 // Config represents the complete SmartLimbo configuration.
 type Config struct {
-	LimboServer           string   `toml:"limbo_server"`
-	DirectConnectServer   string   `toml:"direct_connect_server"`
-	FallbackServers       []string `toml:"fallback_servers"`
-	TaskIntervalMs        int      `toml:"task_interval_ms"`
-	QueueNotifyIntervalMs int      `toml:"queue_notify_interval_ms"`
-	NotifyMode            string   `toml:"notify_mode"`
-	ReconnectBatchSize    int      `toml:"reconnect_batch_size"`
-	ReconnectDelayMs      int      `toml:"reconnect_delay_ms"`
-	PingTimeoutMs         int      `toml:"ping_timeout_ms"`
-	ProtectedLimbo        bool     `toml:"protected_limbo"`
-	AllowedCommands       []string `toml:"allowed_commands"`
-	Messages              Messages `toml:"messages"`
+	LimboServer              string   `toml:"limbo_server"`
+	DirectConnectServer      string   `toml:"direct_connect_server"`
+	FallbackServers          []string `toml:"fallback_servers"`
+	TaskIntervalMs           int      `toml:"task_interval_ms"`
+	QueueNotifyIntervalMs    int      `toml:"queue_notify_interval_ms"`
+	NotifyMode               string   `toml:"notify_mode"`
+	ReconnectBatchSize       int      `toml:"reconnect_batch_size"`
+	ReconnectDelayMs         int      `toml:"reconnect_delay_ms"`
+	PingTimeoutMs            int      `toml:"ping_timeout_ms"`
+	ConnectTimeoutMs         int      `toml:"connect_timeout_ms"`
+	HealthCacheMs            int      `toml:"health_cache_ms"`
+	IgnoreKickReasons        []string `toml:"ignore_kick_reasons"`
+	ClearQueueOnServerSwitch *bool    `toml:"clear_queue_on_server_switch"`
+	ProtectedLimbo           bool     `toml:"protected_limbo"`
+	AllowedCommands          []string `toml:"allowed_commands"`
+	Messages                 Messages `toml:"messages"`
+}
+
+// ShouldClearQueueOnSwitch returns whether transferring to a non-limbo backend cancels pending queues.
+func (c *Config) ShouldClearQueueOnSwitch() bool {
+	if c == nil || c.ClearQueueOnServerSwitch == nil {
+		return true
+	}
+	return *c.ClearQueueOnServerSwitch
 }
 
 // ConfigStore manages thread-safe configuration reading and updating.
@@ -138,7 +195,22 @@ func (cs *ConfigStore) Load() (*Config, error) {
 		return nil, fmt.Errorf("failed to parse TOML config %q: %w", cs.path, err)
 	}
 
-	// Apply robust defaults
+	applyConfigDefaults(&cfg)
+	cs.cfg = &cfg
+	return &cfg, nil
+}
+
+// Set stores an in-memory config (primarily for testing), applying defaults.
+func (cs *ConfigStore) Set(cfg *Config) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cfg != nil {
+		applyConfigDefaults(cfg)
+	}
+	cs.cfg = cfg
+}
+
+func applyConfigDefaults(cfg *Config) {
 	if cfg.LimboServer == "" {
 		cfg.LimboServer = "nanolimbo"
 	}
@@ -166,16 +238,64 @@ func (cs *ConfigStore) Load() (*Config, error) {
 	if cfg.PingTimeoutMs <= 0 {
 		cfg.PingTimeoutMs = 1500
 	}
+	if cfg.ConnectTimeoutMs <= 0 {
+		cfg.ConnectTimeoutMs = 5000
+	}
+	if cfg.HealthCacheMs == 0 {
+		cfg.HealthCacheMs = 1500
+	}
+	if cfg.IgnoreKickReasons == nil {
+		cfg.IgnoreKickReasons = slices.Clone(defaultIgnoreKickReasons)
+	} else {
+		reasons := make([]string, 0, len(cfg.IgnoreKickReasons))
+		for _, r := range cfg.IgnoreKickReasons {
+			if clean := strings.ToLower(strings.TrimSpace(r)); clean != "" {
+				reasons = append(reasons, clean)
+			}
+		}
+		cfg.IgnoreKickReasons = reasons
+	}
 
-	// Normalize allowed commands
-	normalizedCmds := make([]string, len(cfg.AllowedCommands))
-	for i, cmd := range cfg.AllowedCommands {
-		normalizedCmds[i] = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(cmd), "/"))
+	if cfg.Messages.AlreadyInHub == "" {
+		cfg.Messages.AlreadyInHub = "<yellow>You are already connected to <aqua>%server%</aqua>!</yellow>"
+	}
+	if cfg.Messages.ConnectingHub == "" {
+		cfg.Messages.ConnectingHub = "<green>✔ Transferring you to <aqua>%server%</aqua>...</green>"
+	}
+	if cfg.Messages.NoFallbackAvailable == "" {
+		cfg.Messages.NoFallbackAvailable = "<red>✖ No fallback or lobby server is currently reachable.</red>"
+	}
+	if cfg.Messages.ConnectRejected == "" {
+		cfg.Messages.ConnectRejected = "<red>✖ Could not connect to <aqua>%server%</aqua>: <gray>%reason%</gray></red>"
+	}
+	if cfg.Messages.NotInQueue == "" {
+		cfg.Messages.NotInQueue = "<gray>You are not currently in any reconnect queue.</gray>"
+	}
+	if cfg.Messages.CommandBlocked == "" {
+		cfg.Messages.CommandBlocked = "<red>✖ Commands are blocked in Limbo.\n<gray>Use <yellow>/leave</yellow> to exit or <yellow>/reconnect</yellow> to retry.</gray></red>"
+	}
+
+	normalizedCmds := make([]string, 0, len(cfg.AllowedCommands))
+	for _, cmd := range cfg.AllowedCommands {
+		clean := normalizeCommandRoot(cmd)
+		if clean != "" {
+			normalizedCmds = append(normalizedCmds, clean)
+		}
 	}
 	cfg.AllowedCommands = normalizedCmds
+}
 
-	cs.cfg = &cfg
-	return &cfg, nil
+func normalizeCommandRoot(raw string) string {
+	clean := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(raw), "/"))
+	parts := strings.Fields(clean)
+	if len(parts) == 0 {
+		return ""
+	}
+	root := parts[0]
+	if idx := strings.IndexByte(root, ':'); idx >= 0 {
+		root = root[idx+1:]
+	}
+	return root
 }
 
 // Get returns the current Config snapshot.
@@ -194,12 +314,13 @@ func (cs *ConfigStore) IsCommandAllowed(cmd string) bool {
 		return true
 	}
 
-	clean := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(cmd), "/"))
-	parts := strings.Fields(clean)
-	if len(parts) == 0 {
+	rootCmd := normalizeCommandRoot(cmd)
+	if rootCmd == "" {
 		return true
 	}
-	rootCmd := parts[0]
+	if rootCmd == "smartlimbo" || rootCmd == "slimbo" {
+		return true
+	}
 
 	for _, allowed := range cs.cfg.AllowedCommands {
 		if rootCmd == allowed {

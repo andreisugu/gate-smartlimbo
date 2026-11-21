@@ -1,6 +1,8 @@
 package smartlimbo
 
 import (
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +16,8 @@ type QueuedPlayer struct {
 	Player       proxy.Player
 	TargetServer string
 	EnqueuedAt   time.Time
+	InFlight     bool
+	Attempts     int
 }
 
 // QueueManager manages per-server smart queues with thread safety.
@@ -33,13 +37,18 @@ func NewQueueManager() *QueueManager {
 
 // Enqueue adds a player to the queue for targetServer and returns their 1-indexed position.
 func (qm *QueueManager) Enqueue(targetServer string, player proxy.Player) int {
+	if player == nil {
+		return 0
+	}
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
 
 	targetServer = strings.ToLower(strings.TrimSpace(targetServer))
+	if targetServer == "" {
+		return 0
+	}
 	id := player.ID()
 
-	// If player is already in a queue, remove them first
 	if existing, found := qm.players[id]; found {
 		qm.removeFromQueue(existing.TargetServer, id)
 	}
@@ -54,6 +63,52 @@ func (qm *QueueManager) Enqueue(targetServer string, player proxy.Player) int {
 	qm.queues[targetServer] = append(qm.queues[targetServer], id)
 
 	return len(qm.queues[targetServer])
+}
+
+// EnqueueFrontOrPreserve inserts or updates a player in targetServer's queue ordered by enqueuedAt
+// so retried players retain their earlier queue spot. Returns the 1-indexed position.
+func (qm *QueueManager) EnqueueFrontOrPreserve(targetServer string, player proxy.Player, enqueuedAt time.Time, attempts int) int {
+	if player == nil {
+		return 0
+	}
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	targetServer = strings.ToLower(strings.TrimSpace(targetServer))
+	if targetServer == "" {
+		return 0
+	}
+	id := player.ID()
+
+	if existing, found := qm.players[id]; found {
+		qm.removeFromQueue(existing.TargetServer, id)
+	}
+
+	qp := &QueuedPlayer{
+		Player:       player,
+		TargetServer: targetServer,
+		EnqueuedAt:   enqueuedAt,
+		Attempts:     attempts,
+	}
+	qm.players[id] = qp
+
+	list := append(qm.queues[targetServer], id)
+	sort.SliceStable(list, func(i, j int) bool {
+		pi := qm.players[list[i]]
+		pj := qm.players[list[j]]
+		if pi == nil || pj == nil {
+			return false
+		}
+		return pi.EnqueuedAt.Before(pj.EnqueuedAt)
+	})
+	qm.queues[targetServer] = list
+
+	for idx, entryID := range list {
+		if entryID == id {
+			return idx + 1
+		}
+	}
+	return len(list)
 }
 
 // Remove removes a player from any queue they are in.
@@ -71,6 +126,38 @@ func (qm *QueueManager) Remove(id uuid.UUID) (string, bool) {
 	delete(qm.players, id)
 
 	return target, true
+}
+
+// TryStartConnect marks a queued player as currently connecting to avoid concurrent attempts.
+func (qm *QueueManager) TryStartConnect(id uuid.UUID) bool {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	qp, found := qm.players[id]
+	if !found || qp.InFlight {
+		return false
+	}
+	qp.InFlight = true
+	qp.Attempts++
+	return true
+}
+
+// FinishConnect completes an in-flight connection attempt. On success the player is removed;
+// on failure their queue entry and original position are kept with InFlight cleared.
+func (qm *QueueManager) FinishConnect(id uuid.UUID, succeeded bool) {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	qp, found := qm.players[id]
+	if !found {
+		return
+	}
+	if succeeded {
+		qm.removeFromQueue(qp.TargetServer, id)
+		delete(qm.players, id)
+		return
+	}
+	qp.InFlight = false
 }
 
 func (qm *QueueManager) removeFromQueue(target string, id uuid.UUID) {
@@ -108,37 +195,66 @@ func (qm *QueueManager) GetPosition(id uuid.UUID) (targetServer string, position
 	return qp.TargetServer, 1, 1, true
 }
 
-// GetNextBatch pops up to limit players from targetServer's queue.
+// AcquireNextBatch claims up to limit non-in-flight players in targetServer's queue in-place
+// without popping them so they keep their position if reconnection fails.
+func (qm *QueueManager) AcquireNextBatch(targetServer string, limit int) []*QueuedPlayer {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	targetServer = strings.ToLower(strings.TrimSpace(targetServer))
+	list := qm.queues[targetServer]
+	if len(list) == 0 || limit <= 0 {
+		return nil
+	}
+
+	result := make([]*QueuedPlayer, 0, min(limit, len(list)))
+	for _, id := range list {
+		if len(result) >= limit {
+			break
+		}
+		qp, found := qm.players[id]
+		if !found || qp.InFlight {
+			continue
+		}
+		qp.InFlight = true
+		qp.Attempts++
+		copyQP := *qp
+		result = append(result, &copyQP)
+	}
+	return result
+}
+
+// GetNextBatch pops up to limit non-in-flight players from targetServer's queue.
 func (qm *QueueManager) GetNextBatch(targetServer string, limit int) []*QueuedPlayer {
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
 
 	targetServer = strings.ToLower(strings.TrimSpace(targetServer))
 	list := qm.queues[targetServer]
-	if len(list) == 0 {
+	if len(list) == 0 || limit <= 0 {
 		return nil
 	}
 
-	count := limit
-	if count > len(list) {
-		count = len(list)
-	}
+	result := make([]*QueuedPlayer, 0, min(limit, len(list)))
+	remaining := make([]uuid.UUID, 0, len(list))
 
-	result := make([]*QueuedPlayer, 0, count)
-	remaining := list[count:]
-
-	for i := 0; i < count; i++ {
-		id := list[i]
-		if qp, found := qm.players[id]; found {
+	for _, id := range list {
+		qp, found := qm.players[id]
+		if !found {
+			continue
+		}
+		if !qp.InFlight && len(result) < limit {
 			result = append(result, qp)
 			delete(qm.players, id)
+		} else {
+			remaining = append(remaining, id)
 		}
 	}
 
 	if len(remaining) == 0 {
 		delete(qm.queues, targetServer)
 	} else {
-		qm.queues[targetServer] = remaining
+		qm.queues[targetServer] = slices.Clone(remaining)
 	}
 
 	return result
@@ -155,6 +271,7 @@ func (qm *QueueManager) GetActiveTargetServers() []string {
 			servers = append(servers, srv)
 		}
 	}
+	sort.Strings(servers)
 	return servers
 }
 

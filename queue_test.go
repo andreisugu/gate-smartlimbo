@@ -77,3 +77,39 @@ func TestQueueRemoval(t *testing.T) {
 		t.Fatalf("Expected Eve to be shifted to #1, got pos=%d total=%d", pos, total)
 	}
 }
+
+func TestInFlightLockAndOrderPreservation(t *testing.T) {
+	qm := NewQueueManager()
+	alice := newMockPlayer("Alice")
+	bob := newMockPlayer("Bob")
+
+	qm.Enqueue("survival", alice)
+	qm.Enqueue("survival", bob)
+
+	// Acquire batch of 1 -> claims Alice in-place as InFlight
+	batch := qm.AcquireNextBatch("survival", 1)
+	if len(batch) != 1 || batch[0].Player.Username() != "Alice" {
+		t.Fatalf("expected Alice acquired, got %+v", batch)
+	}
+	if qm.TryStartConnect(alice.ID()) {
+		t.Fatalf("expected concurrent TryStartConnect on InFlight Alice to return false")
+	}
+
+	// Simulate reconnect failure -> Alice retains #1 ahead of Bob!
+	qm.FinishConnect(alice.ID(), false)
+	_, posA, totalA, foundA := qm.GetPosition(alice.ID())
+	_, posB, _, _ := qm.GetPosition(bob.ID())
+	if !foundA || posA != 1 || totalA != 2 || posB != 2 {
+		t.Fatalf("expected Alice=#1/2 and Bob=#2/2 after retry failure, got A=%d/%d B=%d", posA, totalA, posB)
+	}
+
+	// Now succeed on Alice -> Bob moves to #1
+	if !qm.TryStartConnect(alice.ID()) {
+		t.Fatalf("expected TryStartConnect to succeed once InFlight cleared")
+	}
+	qm.FinishConnect(alice.ID(), true)
+	_, posB2, totalB2, _ := qm.GetPosition(bob.ID())
+	if posB2 != 1 || totalB2 != 1 {
+		t.Fatalf("expected Bob=#1/1 after Alice connected, got %d/%d", posB2, totalB2)
+	}
+}

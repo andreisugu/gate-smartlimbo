@@ -52,3 +52,32 @@ allowed_commands = ["reconnect", "rc", "queue", "leave", "hub"]
 		t.Errorf("Expected /pay to be blocked in Limbo")
 	}
 }
+
+func TestNamespacedCommandBlockedAndKickDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "smartlimbo.toml")
+	if err := os.WriteFile(configPath, []byte(`
+protected_limbo = true
+allowed_commands = ["reconnect", "hub"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewConfigStore(configPath)
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.IgnoreKickReasons) == 0 {
+		t.Fatalf("expected default ignore_kick_reasons")
+	}
+	if store.IsCommandAllowed("/minecraft:me hello") {
+		t.Errorf("expected namespaced /minecraft:me to be blocked in Limbo")
+	}
+	if !store.IsCommandAllowed("/smartlimbo status") {
+		t.Errorf("expected /smartlimbo status to remain allowed in Limbo")
+	}
+	if !store.IsCommandAllowed("/lobby") && store.IsCommandAllowed("/bukkit:me") {
+		t.Errorf("expected /bukkit:me to be blocked")
+	}
+}

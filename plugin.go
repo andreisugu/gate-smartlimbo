@@ -26,30 +26,35 @@ var Plugin = proxy.Plugin{
 		handler := NewLimboHandler(p, store, queue, log)
 		handler.Start(ctx)
 
-		// 1. Kick Failover to Limbo
+		// 1. Kick Failover to Limbo / Notify on switch failure
 		event.Subscribe(p.Event(), 0, func(e *proxy.KickedFromServerEvent) {
 			handler.HandleKick(e)
 		})
 
-		// 2. Initial Connection Failover
+		// 2. Initial Connection Health Check & Failover
 		event.Subscribe(p.Event(), 0, func(e *proxy.PlayerChooseInitialServerEvent) {
 			handler.HandleInitialServer(e)
 		})
 
-		// 3. Protected Limbo Command Blocker
+		// 3. Clear queue when player connects to target or switches gameplay server
+		event.Subscribe(p.Event(), 0, func(e *proxy.ServerPostConnectEvent) {
+			handler.HandlePostConnect(e)
+		})
+
+		// 4. Protected Limbo Command Blocker
 		event.Subscribe(p.Event(), 0, func(e *proxy.CommandExecuteEvent) {
 			handler.HandleCommand(e)
 		})
 
-		// 4. Cleanup on Disconnect
+		// 5. Cleanup on Disconnect
 		event.Subscribe(p.Event(), 0, func(e *proxy.DisconnectEvent) {
 			handler.HandleDisconnect(e)
 		})
 
-		// 5. Register In-Game Commands
-		RegisterCommands(p, store, queue)
+		// 6. Register In-Game Commands
+		RegisterCommands(p, store, queue, handler)
 
-		log.Info("SmartLimbo loaded (smart failover, per-server queue & protected limbo active)")
+		log.Info("SmartLimbo loaded (smart failover, cached health probes, per-server queue & /hub active)")
 		return nil
 	},
 }
