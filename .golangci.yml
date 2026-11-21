@@ -1,0 +1,26 @@
+version: "2"
+
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - ineffassign
+    - unused
+    - misspell
+  settings:
+    staticcheck:
+      checks:
+        - "all"
+        - "-QF*"
+        - "-ST1000"
+        - "-ST1003"
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (net.Listener).Close
+        - os.RemoveAll
+
+formatters:
+  enable:
+    - gofmt
